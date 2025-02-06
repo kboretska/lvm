@@ -1,0 +1,104 @@
+- name: Configure LVM and replace /var
+  hosts: all
+  become: true
+  tasks:
+
+    - name: Install required packages
+      apt:
+        name:
+          - lvm2
+          - rsync
+        state: present
+      when: ansible_os_family == "Debian"
+
+    - name: Check available disks
+      command: lsblk -dn -o NAME
+      register: disks
+      changed_when: false
+
+    - name: Find new disk (excluding existing partitions)
+      set_fact:
+        new_disk: "/dev/{{ item }}"
+      with_items: "{{ disks.stdout_lines }}"
+      when: "'sdb' in item"
+
+    - name: Check if PV exists
+      command: pvs --noheadings -o pv_name
+      register: existing_pvs
+      changed_when: false
+
+    - name: Create Physical Volume (PV) if not exists
+      command: pvcreate {{ new_disk }}
+      when: new_disk is defined and new_disk not in existing_pvs.stdout
+
+    - name: Check if VG exists
+      command: vgs --noheadings -o vg_name
+      register: existing_vgs
+      changed_when: false
+
+    - name: Create Volume Group (VG) if not exists
+      command: vgcreate vg_var {{ new_disk }}
+      when: new_disk is defined and "vg_var" not in existing_vgs.stdout
+
+    - name: Check if LV exists
+      command: lvs --noheadings -o lv_name
+      register: existing_lvs
+      changed_when: false
+
+    - name: Create Logical Volume (LV) if not exists
+      command: lvcreate -L 4G -n lv_var vg_var
+      when: "'lv_var' not in existing_lvs.stdout"
+
+    - name: Format the logical volume as ext4
+      command: mkfs.ext4 /dev/vg_var/lv_var
+      when: "'lv_var' not in existing_lvs.stdout"
+
+    - name: Create mount point for new /var
+      file:
+        path: /mnt/newvar
+        state: directory
+        mode: '0755'
+
+    - name: Check if /mnt/newvar is already mounted
+      shell: mountpoint -q /mnt/newvar
+      register: mount_check
+      changed_when: false
+      failed_when: false
+
+    - name: Mount new LV to temporary location (if not mounted)
+      command: mount /dev/vg_var/lv_var /mnt/newvar
+      when: mount_check.rc != 0
+
+    - name: Copy old /var data to new volume
+      command: rsync -avx /var/ /mnt/newvar/
+
+    - name: Ensure /etc/fstab contains new /var mount entry
+      lineinfile:
+        path: /etc/fstab
+        line: "/dev/vg_var/lv_var /var ext4 defaults 0 2"
+        state: present
+        create: yes
+
+    - name: Check if /var is mounted
+      shell: mountpoint -q /var
+      register: var_mount_status
+      changed_when: false
+      failed_when: false
+
+    - name: Unmount old /var and remount new one (if mounted)
+      shell: |
+        umount /var && mount -a
+      args:
+        executable: /bin/bash
+      when: var_mount_status.rc == 0
+
+    - name: Reload systemd to apply fstab changes
+      command: systemctl daemon-reexec
+
+    - name: Verify new /var is mounted
+      shell: mount | grep "/var"
+      register: var_mount
+      changed_when: false
+
+    - debug:
+        msg: "New /var is mounted: {{ var_mount.stdout }}"
