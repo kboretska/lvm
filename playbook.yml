@@ -69,6 +69,27 @@
       command: mount /dev/vg_var/lv_var /mnt/newvar
       when: mount_check.rc != 0
 
+    - name: Check if processes are using /var
+      shell: lsof +f -- /var || true
+      register: var_processes
+      changed_when: false
+
+    - name: Kill processes using /var (if necessary)
+      shell: |
+        for pid in $(lsof +f -- /var | awk 'NR>1 {print $2}' | sort -u); do
+          kill -9 $pid || true
+        done
+      when: var_processes.stdout != ""
+
+    - name: Force unmount /var if still busy
+      shell: fuser -km /var || true
+
+    - name: Unmount old /var (lazy mode)
+      shell: umount -l /var
+
+    - name: Remount all filesystems
+      command: mount -a
+
     - name: Copy old /var data to new volume
       command: rsync -avx /var/ /mnt/newvar/
 
